@@ -1,0 +1,90 @@
+name: Deploy HelpDesk Pro
+
+on:
+  push:
+    branches:
+      - main        # → PRODUKCJA
+      - develop     # → TEST/STAGING
+
+jobs:
+  deploy:
+    name: Deploy to OVH VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, bcmath, pdo_mysql, zip
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-dev --optimize-autoloader --no-interaction
+
+      - name: Run tests (tylko dla develop)
+        if: github.ref == 'refs/heads/develop'
+        run: php artisan test --env=testing
+
+      # ── Deploy na PRODUKCJĘ ─────────────────────────────────────────────
+      - name: Deploy to PRODUCTION (main)
+        if: github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd /var/www/helpdesk
+
+            echo "→ Git pull"
+            git pull origin main
+
+            echo "→ Composer"
+            composer install --no-dev --optimize-autoloader
+
+            echo "→ Maintenance ON"
+            php artisan down --secret="deploy-secret-token"
+
+            echo "→ Migrate"
+            php artisan migrate --force
+
+            echo "→ Cache"
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+
+            echo "→ Queue restart"
+            php artisan queue:restart
+
+            echo "→ Maintenance OFF"
+            php artisan up
+
+            echo "✅ Deploy PRODUKCJA zakończony: $(date)"
+
+      # ── Deploy na TEST ──────────────────────────────────────────────────
+      - name: Deploy to STAGING (develop)
+        if: github.ref == 'refs/heads/develop'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd /var/www/helpdesk-test
+
+            git pull origin develop
+            composer install --optimize-autoloader
+
+            php artisan down --secret="test-deploy-token"
+            php artisan migrate --env=testing --force
+            php artisan config:cache
+            php artisan view:cache
+            php artisan up
+
+            echo "✅ Deploy STAGING zakończony: $(date)"
